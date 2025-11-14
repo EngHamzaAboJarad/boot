@@ -3,13 +3,26 @@ from pptx import Presentation
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
 import os
-
-# تلخيص محلي
+from flask import Flask
+import threading
+import asyncio
 from sumy.parsers.plaintext import PlaintextParser
 from sumy.nlp.tokenizers import Tokenizer
-from sumy.summarizers.lsa import LsaSummarizer  # يمكن تغييره إلى LuhnSummarizer أو LexRank
+from sumy.summarizers.lsa import LsaSummarizer
 
+# --- جلب التوكن من Environment أو مباشرة ---
 BOT_TOKEN = "7935681061:AAG6zPjZ_0mifx_Mccijvjzzu_cFVFWrKaw"
+
+# --- إعداد Web Server ---
+app_web = Flask(__name__)
+
+@app_web.route("/")
+def home():
+    return "Bot is running on Render!"
+
+def run_web():
+    port = int(os.environ.get("PORT", 10000))
+    app_web.run(host="0.0.0.0", port=port)
 
 # --- دالة تلخيص النص ---
 def summarize_text_local(text, sentences_count=2):
@@ -22,7 +35,7 @@ def summarize_text_local(text, sentences_count=2):
     summary = " ".join([str(sentence) for sentence in summary_sentences])
     return summary if summary else "لا يوجد محتوى كافي للتلخيص"
 
-# --- دوال معالجة PPT وPDF ---
+# --- معالجة PPT ---
 def process_ppt(file_path):
     prs = Presentation(file_path)
     summaries = []
@@ -32,6 +45,7 @@ def process_ppt(file_path):
         summaries.append(f"📌 سلايد {i}:\n{summary}\n")
     return summaries
 
+# --- معالجة PDF ---
 def process_pdf(file_path):
     doc = fitz.open(file_path)
     summaries = []
@@ -41,15 +55,15 @@ def process_pdf(file_path):
         summaries.append(f"📌 صفحة {i}:\n{summary}\n")
     return summaries
 
-# --- دالة استقبال الملفات ---
+# --- استقبال الملفات ---
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     document = update.message.document
     file_name = document.file_name
     file_path = f"temp_{file_name}"
-    
+
     file = await document.get_file()
     await file.download_to_drive(file_path)
-    
+
     try:
         if file_name.endswith(".pptx"):
             summaries = process_ppt(file_path)
@@ -65,24 +79,35 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if os.path.exists(file_path):
             os.remove(file_path)
 
-    # --- إرسال كل سلايد/صفحة في رسالة منفصلة ---
+    # إرسال كل الملخصات
     for summary in summaries:
         for i in range(0, len(summary), 4000):
             await update.message.reply_text(summary[i:i+4000])
 
-    # --- إنشاء ملف TXT بالملخصات ---
+    # إنشاء ملف TXT بالملخصات
     summary_file = f"summary_{file_name}.txt"
     with open(summary_file, "w", encoding="utf-8") as f:
         for s in summaries:
             f.write(s + "\n")
 
-    # --- إرسال الملف للمستخدم ---
     await update.message.reply_document(open(summary_file, "rb"))
     os.remove(summary_file)
 
 # --- تشغيل البوت ---
-app = ApplicationBuilder().token(BOT_TOKEN).build()
-app.add_handler(MessageHandler(filters.Document.ALL, handle_file))
+async def run_bot():
+    application = ApplicationBuilder().token(BOT_TOKEN).build()
+    application.add_handler(MessageHandler(filters.Document.ALL, handle_file))
+    await application.initialize()   # تهيئة البوت
+    await application.start()        # تشغيل البوت
+    await application.updater.start_polling()  # بدء استقبال الرسائل
+    await asyncio.Event().wait()     # إبقاء البوت يعمل
 
-print("🚀 البوت جاهز للتلخيص محليًا بدون OpenAI!")
-app.run_polling()
+# --- Main ---
+if __name__ == "__main__":
+    # تشغيل Flask في Thread منفصل
+    threading.Thread(target=run_web, daemon=True).start()
+
+    # تشغيل Telegram bot بدون asyncio.run
+    loop = asyncio.get_event_loop()
+    loop.create_task(run_bot())
+    loop.run_forever()
