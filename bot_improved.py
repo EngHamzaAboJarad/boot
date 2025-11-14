@@ -1,58 +1,56 @@
-import fitz  # PyMuPDF
+import fitz
 from pptx import Presentation
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
 import os
-from flask import Flask
-import threading
-import asyncio
-from sumy.parsers.plaintext import PlaintextParser
-from sumy.nlp.tokenizers import Tokenizer
-from sumy.summarizers.lsa import LsaSummarizer
+from flask import Flask, request
 
-# --- جلب التوكن من Environment أو مباشرة ---
-BOT_TOKEN = "7935681061:AAG6zPjZ_0mifx_Mccijvjzzu_cFVFWrKaw"
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "7935681061:AAG6zPjZ_0mifx_Mccijvjzzu_cFVFWrKaw")
+WEBHOOK_PATH = f"/{BOT_TOKEN}"
 
-# --- إعداد Web Server ---
+# Flask app
 app_web = Flask(__name__)
 
 @app_web.route("/")
 def home():
     return "Bot is running on Render!"
 
-def run_web():
-    port = int(os.environ.get("PORT", 10000))
-    app_web.run(host="0.0.0.0", port=port)
+@app_web.route(WEBHOOK_PATH, methods=["POST"])
+def webhook():
+    update = Update.de_json(request.get_json(force=True), bot_app.bot)
+    bot_app.update_queue.put_nowait(update)
+    return "ok"
 
-# --- دالة تلخيص النص ---
+# --- تلخيص النص ---
 def summarize_text_local(text, sentences_count=2):
+    from sumy.parsers.plaintext import PlaintextParser
+    from sumy.nlp.tokenizers import Tokenizer
+    from sumy.summarizers.lsa import LsaSummarizer
+
     if not text.strip():
         return "لا يوجد نص للسلايد"
-    
+
     parser = PlaintextParser.from_string(text, Tokenizer("arabic"))
     summarizer = LsaSummarizer()
     summary_sentences = summarizer(parser.document, sentences_count)
     summary = " ".join([str(sentence) for sentence in summary_sentences])
     return summary if summary else "لا يوجد محتوى كافي للتلخيص"
 
-# --- معالجة PPT ---
+# --- معالجة الملفات ---
 def process_ppt(file_path):
     prs = Presentation(file_path)
     summaries = []
     for i, slide in enumerate(prs.slides, start=1):
         text = " ".join([shape.text for shape in slide.shapes if hasattr(shape, "text")])
-        summary = summarize_text_local(text)
-        summaries.append(f"📌 سلايد {i}:\n{summary}\n")
+        summaries.append(f"📌 سلايد {i}:\n{summarize_text_local(text)}\n")
     return summaries
 
-# --- معالجة PDF ---
 def process_pdf(file_path):
     doc = fitz.open(file_path)
     summaries = []
     for i, page in enumerate(doc, start=1):
         text = page.get_text()
-        summary = summarize_text_local(text)
-        summaries.append(f"📌 صفحة {i}:\n{summary}\n")
+        summaries.append(f"📌 صفحة {i}:\n{summarize_text_local(text)}\n")
     return summaries
 
 # --- استقبال الملفات ---
@@ -72,19 +70,16 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text("❌ نوع الملف غير مدعوم، استخدم PDF أو PPTX.")
             return
-    except Exception as e:
-        await update.message.reply_text(f"⚠️ حدث خطأ أثناء معالجة الملف: {e}")
-        return
     finally:
         if os.path.exists(file_path):
             os.remove(file_path)
 
-    # إرسال كل الملخصات
+    # إرسال الملخصات
     for summary in summaries:
         for i in range(0, len(summary), 4000):
             await update.message.reply_text(summary[i:i+4000])
 
-    # إنشاء ملف TXT بالملخصات
+    # حفظ الملف
     summary_file = f"summary_{file_name}.txt"
     with open(summary_file, "w", encoding="utf-8") as f:
         for s in summaries:
@@ -93,21 +88,13 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_document(open(summary_file, "rb"))
     os.remove(summary_file)
 
-# --- تشغيل البوت ---
-async def run_bot():
-    application = ApplicationBuilder().token(BOT_TOKEN).build()
-    application.add_handler(MessageHandler(filters.Document.ALL, handle_file))
-    await application.initialize()   # تهيئة البوت
-    await application.start()        # تشغيل البوت
-    await application.updater.start_polling()  # بدء استقبال الرسائل
-    await asyncio.Event().wait()     # إبقاء البوت يعمل
+# --- إعداد البوت ---
+bot_app = ApplicationBuilder().token(BOT_TOKEN).build()
+bot_app.add_handler(MessageHandler(filters.Document.ALL, handle_file))
 
-# --- Main ---
+# --- تشغيل Flask ---
 if __name__ == "__main__":
-    # تشغيل Flask في Thread منفصل
-    threading.Thread(target=run_web, daemon=True).start()
-
-    # تشغيل Telegram bot بدون asyncio.run
-    loop = asyncio.get_event_loop()
-    loop.create_task(run_bot())
-    loop.run_forever()
+    port = int(os.environ.get("PORT", 10000))
+    # عند رفعه على Render، يجب ضبط Webhook للبوت:
+    # https://api.telegram.org/bot<TOCKEN>/setWebhook?url=https://boot-z9f1.onrender.com/<TOCKEN>
+    app_web.run(host="0.0.0.0", port=port)
